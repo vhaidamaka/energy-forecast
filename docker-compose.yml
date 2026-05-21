@@ -1,0 +1,55 @@
+services:
+
+  # ── FastAPI backend ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: energy-predictor-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "sqlite:////app/storage/energy_predictor.db"
+      DATA_DIR: "/app/storage/data"
+      RUNS_DIR: "/app/storage/runs"
+      CORS_ORIGINS: "http://localhost,http://localhost:80"
+      DEBUG: "false"
+    volumes:
+      # Persistent storage — DB, uploaded datasets, model runs
+      - energy_storage:/app/storage
+    ports:
+      # Expose backend directly on 8000 for debugging / API access
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - energy-net
+
+  # ── React frontend (nginx) ───────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: energy-predictor-frontend
+    restart: unless-stopped
+    ports:
+      # Main UI entry point
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - energy-net
+
+# ── Named volume ─────────────────────────────────────────────────────────────
+volumes:
+  energy_storage:
+    driver: local
+
+# ── Network ──────────────────────────────────────────────────────────────────
+networks:
+  energy-net:
+    driver: bridge

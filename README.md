@@ -1,6 +1,22 @@
 # ⚡ Energy Predictor
 
-A full-stack energy consumption prediction platform supporting ARIMA, LSTM, BiLSTM, and Wavelet+LSTM models.
+A full-stack energy consumption prediction platform with **10 forecasting models**, a React dashboard, live training logs, batch runs, stacking ensembles, and CSV/Excel export.
+
+---
+
+## Screenshots
+
+### Dashboard
+![Dashboard](screenshots/dashboard.png)
+
+### Datasets
+![Datasets](screenshots/datasets.png)
+
+### Batch Run
+![Batch Run](screenshots/batch_run.png)
+
+### Results
+![Results](screenshots/results.png)
 
 ---
 
@@ -129,25 +145,55 @@ python -m cli.predict run delete 2
 python -m cli.predict export 1 --format csv
 python -m cli.predict export 1 --format excel --out my_results.xlsx
 
-# Show model defaults
+# Show all models and their default hyperparameters
 python -m cli.predict models
 
-# Custom hyperparameters via JSON
+# Custom hyperparameters via JSON (works for any model)
 python -m cli.predict predict data.csv \
   --model lstm \
   --params '{"epochs": 100, "lookback": 48, "units_1": 128, "dropout": 0.3}'
+
+python -m cli.predict predict data.csv \
+  --model nbeats \
+  --params '{"lookback": 168, "stack_types": "trend,seasonality,generic", "num_blocks": 3}'
+
+python -m cli.predict predict data.csv \
+  --model tft \
+  --params '{"d_model": 64, "n_heads": 4, "lookback": 48}'
 ```
 
 ---
 
 ## Supported Models
 
-| Model | Description | Best for |
+Ten models are available, from classical statistics to state-of-the-art deep learning. All neural models share the same training pipeline (EarlyStopping, ReduceLROnPlateau, configurable optimizer) and produce identical output (MAE, RMSE, MAPE, test predictions, forecast).
+
+| Model | Key | Architecture | Best for | Default lookback |
+|---|---|---|---|---|
+| ARIMA / SARIMAX | `arima` | Classical ARIMA(p,d,q) with optional seasonal order | Univariate series, fast baseline, seasonal patterns | — |
+| LSTM | `lstm` | 2-layer LSTM + dense head | General multivariate forecasting | 24 h |
+| BiLSTM | `bilstm` | Bidirectional LSTM (concat merge) | Higher accuracy at the cost of extra parameters | 24 h |
+| GRU | `gru` | 2-layer GRU + dense head | Faster training than LSTM, comparable accuracy | 24 h |
+| BiGRU | `bigru` | Bidirectional GRU (concat merge) | Best of both: bidirectional context + GRU efficiency | 24 h |
+| Wavelet+LSTM | `wavelet_lstm` | DWT (db4/haar/sym8) feature extraction → 2-layer LSTM | Noisy signals, multi-frequency energy patterns | 168 h |
+| Transformer | `transformer` | Sinusoidal PE + N × encoder blocks (MHA + FFN) → GAP → Dense | Long-range dependencies | 48 h |
+| TFT | `tft` | Variable Selection → GRN → LSTM encoder → MHA → Dense | Multivariate with interpretable feature importance | 48 h |
+| N-BEATS | `nbeats` | Doubly-residual stacks (trend / seasonality / generic) | Interpretable decomposition, strong univariate baseline | 168 h |
+| Ensemble | `ensemble` | Stacking meta-learner (Ridge / mean / weighted-MAPE) over finished runs | Combining complementary models for best accuracy | — |
+
+### Shared neural training options
+
+| Parameter | Default | Description |
 |---|---|---|
-| `arima` | ARIMA / SARIMAX | Univariate, seasonal, fast |
-| `lstm` | 2-layer LSTM | General multivariate |
-| `bilstm` | Bidirectional LSTM | Higher accuracy, more memory |
-| `wavelet_lstm` | DWT (db4/haar/sym8) + LSTM | Noisy signals, multi-frequency |
+| `train_split` | `0.8` | Fraction used for training |
+| `validation_split` | `0.1` | Fraction of training used for validation |
+| `optimizer` | `adam` | `adam` / `adamw` / `sgd` / `rmsprop` |
+| `learning_rate` | `0.001` | Initial learning rate |
+| `early_stopping` | `true` | Stop when val_loss plateaus |
+| `es_patience` | `10` | Epochs before early stop |
+| `reduce_lr` | `true` | Reduce LR on plateau |
+| `lr_factor` | `0.5` | LR multiplier on plateau |
+| `lr_patience` | `5` | Epochs before LR reduction |
 
 ### Wavelet+LSTM approach
 
@@ -155,6 +201,21 @@ python -m cli.predict predict data.csv \
 2. Concat into a fixed 10-element global feature vector
 3. Tile across all timesteps and concatenate with scaled time features
 4. Feed into 2-layer LSTM (64→32 units, 20% dropout)
+
+### N-BEATS approach
+
+1. Build stacks of type `trend`, `seasonality`, and `generic` (configurable via `stack_types`)
+2. Each block outputs a **backcast** (explained portion of input) and a **forecast** contribution
+3. Residual connection: each block sees only the unexplained remainder from the previous block
+4. Final forecast = sum of all block forecasts (doubly-residual boosting)
+
+### Stacking Ensemble approach
+
+1. Load `test_predicted_json` from each selected base run
+2. Align all predictions to common timestamps (inner join)
+3. Fit a **Ridge regression** meta-learner on stacked test predictions → actual values
+4. Blend out-of-sample forecasts using the learned coefficients
+5. Alternative blending: `mean` (equal weights) or `weighted_mape` (weight = 1/MAPE)
 
 ---
 
@@ -167,7 +228,6 @@ energy-predictor/
 ├── .env.example                  Environment template
 ├── backend/
 │   ├── Dockerfile                Multi-stage Python build
-│   ├── .dockerignore
 │   ├── main.py                   FastAPI app
 │   ├── config.py                 Settings (env-aware)
 │   ├── schemas.py                Pydantic models
@@ -175,13 +235,22 @@ energy-predictor/
 │   ├── core/
 │   │   ├── database.py           SQLAlchemy models
 │   │   ├── preprocessing.py      CSV/XLSX ingestion
-│   │   ├── seq_utils.py          Sliding window utils
-│   │   └── training_runner.py    Async training + SSE logs
+│   │   ├── seq_utils.py          Sliding window, scaling, wavelet utils
+│   │   ├── train_utils.py        Callbacks, optimizer factory, split helpers
+│   │   └── training_runner.py    Async training + SSE log stream
 │   ├── models/
-│   │   ├── arima_model.py
-│   │   ├── lstm_model.py
-│   │   ├── bilstm_model.py
-│   │   └── wavelet_lstm_model.py
+│   │   ├── base.py               BasePredictor ABC + PredictionResult dataclass
+│   │   ├── arima_model.py        ARIMA / SARIMAX
+│   │   ├── lstm_model.py         2-layer LSTM
+│   │   ├── bilstm_model.py       Bidirectional LSTM
+│   │   ├── gru_model.py          GRU (inherits LSTM pipeline)
+│   │   ├── bigru_model.py        Bidirectional GRU
+│   │   ├── wavelet_lstm_model.py DWT feature extraction + LSTM
+│   │   ├── transformer_model.py  Vanilla Transformer encoder
+│   │   ├── tft_model.py          Temporal Fusion Transformer
+│   │   ├── nbeats_model.py       N-BEATS doubly-residual stacks
+│   │   ├── ensemble_model.py     Stacking ensemble (Ridge / mean / weighted-MAPE)
+│   │   └── __init__.py           REGISTRY + DEFAULT_HYPERPARAMS
 │   ├── api/routes/
 │   │   ├── datasets.py
 │   │   ├── runs.py
@@ -190,19 +259,35 @@ energy-predictor/
 └── frontend/
     ├── Dockerfile                Multi-stage Node → nginx
     ├── Dockerfile.dev            Vite dev server
-    ├── .dockerignore
     ├── nginx.conf                Nginx: SPA + /api proxy + SSE
     ├── vite.config.js
     └── src/
         ├── pages/
-        │   ├── Dashboard.jsx
-        │   ├── Datasets.jsx
-        │   ├── Configure.jsx
-        │   ├── Training.jsx      Live SSE log stream
-        │   ├── Results.jsx       Charts + export
-        │   └── Compare.jsx       Side-by-side comparison
+        │   ├── Dashboard.jsx     Overview: recent runs + quick stats
+        │   ├── Datasets.jsx      Upload, preview, rename, delete datasets
+        │   ├── Configure.jsx     Model + hyperparameter configuration
+        │   ├── Training.jsx      Live SSE log stream during training
+        │   ├── Results.jsx       Charts, metrics, forecast table + export
+        │   ├── Compare.jsx       Side-by-side metric comparison (bar charts)
+        │   ├── BatchRun.jsx      Run all models on one dataset in one click
+        │   └── Ensemble.jsx      Build stacking ensemble from finished runs
         └── api/client.js
 ```
+
+---
+
+## UI Pages
+
+| Page | Route | Description |
+|---|---|---|
+| Dashboard | `/` | Overview of recent runs with status badges and quick-access links |
+| Datasets | `/datasets` | Upload CSV/XLSX, preview rows, rename, and delete datasets |
+| Configure | `/configure` | Choose model, set forecast horizon and hyperparameters, then launch |
+| Training | `/training/:id` | Real-time SSE log stream while the model trains |
+| Results | `/results/:id` | Interactive forecast chart, test-vs-actual chart, metric cards, export |
+| Compare | `/compare` | Side-by-side MAE/RMSE/MAPE bar charts across multiple runs |
+| Batch Run | `/batch` | Select any combination of models + one dataset, train them all at once |
+| Ensemble | `/ensemble` | Pick finished runs, choose blend method, launch stacking ensemble |
 
 ---
 
@@ -216,12 +301,13 @@ energy-predictor/
 | GET | `/api/datasets/{id}/preview` | Preview rows |
 | PUT | `/api/datasets/{id}` | Rename/update |
 | DELETE | `/api/datasets/{id}` | Delete dataset |
-| POST | `/api/runs/` | Create run |
+| POST | `/api/runs/` | Create a run (single model or ensemble) |
 | POST | `/api/runs/{id}/start` | Start training |
 | GET | `/api/runs/{id}/logs` | SSE live log stream |
-| GET | `/api/runs/` | List runs |
+| GET | `/api/runs/` | List all runs |
 | GET | `/api/runs/{id}` | Get run + result |
-| GET | `/api/runs/compare/metrics?run_ids=1,2,3` | Compare metrics |
-| GET | `/api/export/{id}/csv` | Download CSV |
-| GET | `/api/export/{id}/excel` | Download Excel |
-| GET | `/api/models/defaults` | Default hyperparams |
+| DELETE | `/api/runs/{id}` | Delete run |
+| GET | `/api/runs/compare/metrics?run_ids=1,2,3` | Compare metrics across runs |
+| GET | `/api/export/{id}/csv` | Download results as CSV |
+| GET | `/api/export/{id}/excel` | Download results as Excel |
+| GET | `/api/models/defaults` | Default hyperparams for all models |
